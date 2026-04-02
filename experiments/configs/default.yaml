@@ -1,0 +1,28 @@
+environment:
+  gamma: 0.85
+  n_episodes: 1500
+  max_steps_per_episode: 300
+  n_runs: 10
+
+learning_rate:
+  omega: 0.8        # alpha_t = (1 / visit_count[s,a]) ^ omega
+
+exploration:
+  epsilon_start: 0.4
+  epsilon_decay: 0.9   # per step within an episode
+
+entropy_q:
+  beta_min: 0.1
+  beta_max: 7.0        # linearly scheduled over n_episodes
+
+sarsa_lambda:
+  lambda_val: 0.9
+
+actor_critic:
+  lambda_critic: 0.9
+  lambda_actor: 0.9
+  lr_actor: 0.01
+
+reinforce:
+  lr_policy: 0.01
+  lr_baseline: 0.1
