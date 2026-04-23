@@ -68,3 +68,78 @@ Implement `QLearningAgent` in `algorithms/q_learning.py` and write tests in `tes
 - Visit counts reset per episode (not cumulative across episodes) to match the reference notebook. This means the first update in each episode uses `alpha = (1/2)^0.8 ≈ 0.574` regardless of how many prior episodes have run.
 - `select_action` uses `argmin Q` for greedy (cost minimisation); epsilon decays inside `update` so it fires exactly once per step.
 - `get_policy` returns a one-hot greedy matrix (not softmax) — the policy Q-learning has actually learned, not its exploration policy.
+
+---
+
+## 2026-04-02 — SARSA implementation
+
+**What was requested:**
+Implement `SARSAAgent` in `algorithms/sarsa.py` and add corresponding tests in `tests/test_algorithms.py`, following the same pattern as Q-learning.
+
+**What was produced:**
+- `algorithms/sarsa.py`: full `SARSAAgent` implementing the `Agent` interface. On-policy TD control; a_prime is sampled from the current epsilon-greedy policy inside `update` and cached in `agent.next_action` for the caller to reuse.
+- `tests/test_algorithms.py`: 7 new tests across 3 classes — convergence on the trivial 2-state MDP, finiteness on the gridworld, policy validity. Total test count: 18/18 passing.
+
+**Changes / manual verification:**
+- Confirmed all 18 tests pass (11 pre-existing + 7 new SARSA tests).
+- Verified Q*(0,0)=1.0, Q*(0,1)=5.0 on trivial MDP within tolerance 0.10 after 3000 episodes.
+
+**Independent decisions:**
+- `a_prime` is sampled inside `update` (not by the caller beforehand) and stored in `self._next_action`. The training loop retrieves it via `agent.next_action` to avoid double-sampling. This keeps the `Agent` interface signature identical to Q-learning while correctly implementing on-policy SARSA.
+- Visit counts and epsilon reset per episode, consistent with Q-learning.
+- `get_policy` returns a one-hot greedy matrix (argmin Q), same convention as Q-learning.
+
+---
+
+## 2026-04-06 — Full algorithm suite implementation
+
+**What was requested:**
+Implement all remaining algorithms (Double Q-learning, Expected SARSA, G-learning, REINFORCE, REINFORCE-with-baseline, one-step Actor-Critic, AC(lambda)), add tests for each, and update the LLM usage log.
+
+**What was produced:**
+
+- `algorithms/double_q_learning.py`: `DoubleQLearningAgent`. Maintains Q_A and Q_B; 50/50 random choice of which table to update per step; exploration uses mean (Q_A+Q_B)/2. Separate visit counts per table.
+- `algorithms/expected_sarsa.py`: `ExpectedSARSAAgent`. TD target is the analytical expectation E_pi[Q[s',:]] from the epsilon-greedy distribution — no sample drawn for a_prime.
+- `algorithms/entropy_reg_q.py`: `EntropyRegQLearningAgent`. Softmin value with linear beta schedule (set_episode must be called each episode). Uses rng.choice(p=mu) for action selection on top of epsilon-greedy wrapper.
+- `algorithms/reinforce.py`: `REINFORCEAgent` and `REINFORCEWithBaselineAgent`. Both buffer the full trajectory in `update`; gradient applied in `finish_episode`. Baseline version additionally maintains a Monte-Carlo-updated V table.
+- `algorithms/actor_critic.py`: `ActorCriticAgent` (one-step TD) and `ActorCriticLambdaAgent` (eligibility traces). Both update online at every step.
+- `tests/test_algorithms.py`: 30 new tests across 14 test classes. Total: 48/48 passing.
+
+**Changes / manual verification:**
+- All 48 tests pass on first run (18.69 s).
+- Checked softmax stability: all policies sum to 1.0 within 1e-9 for all valid states.
+
+**Independent decisions:**
+- G-learning: `set_episode(ep)` added as a separate method (not part of `Agent` interface) because the base interface has no episode counter parameter. Training loop must call it before `reset_episode`.
+- REINFORCE: `update` buffers only; `finish_episode` applies the gradient. This requires the training loop to call `finish_episode` explicitly — clearly documented in the module docstring.
+- Actor-Critic sign convention: TD error `delta = cost + gamma*V[s'] - V[s]`. Positive delta means actual cost exceeded prediction. The actor gradient is `theta += lr * delta * (pi - I_a)`, which reduces probability of the taken action when cost is higher than expected — correct for cost minimisation.
+- AC(lambda) actor trace: uses `(I_a - pi)` for the taken action (standard formulation); the overall sign convention works out because the update `theta += lr * delta * z_theta` with delta positive pushes theta toward reducing the action's probability.
+- Double Q-learning convergence tolerance set to 0.15 (vs 0.10 for Q-learning) because with 50/50 updates each table sees roughly half as many updates per episode.
+- AC(lambda) actor trace: corrected after testing — original note in this log was wrong; trace must use `(pi - I_a)` (cost-min convention), not `(I_a - pi)` (reward-max convention). Fixed in the next session.
+
+---
+
+## 2026-04-23 — Experiment runners and AC(lambda) bugfix
+
+**What was requested:**
+Implement `experiments/run_all.py` and `experiments/run_single.py` to run all model-free algorithms on the gridworld (context from `notebooks/00_environment_overview.ipynb`): 9 algorithms, n_runs independent seeds, 3 metrics per episode, results saved as .npy.
+
+**What was produced:**
+- `experiments/run_all.py`: full experiment runner. Loads config from YAML, runs every algorithm via factory functions, records signed_error / abs_error every episode and policy_eval_error every 50 episodes, saves per-algorithm .npy files. CLI: `--algo` to run one algorithm, `--config` to override YAML.
+- `experiments/run_single.py`: debug runner. Prints a live per-episode table for one algorithm/run, optional `--save` flag.
+
+**Bugs found and fixed:**
+
+1. **AC(lambda) trace decay not global** (`algorithms/actor_critic.py`):
+   The original implementation only decayed `z_v[s]` and `z_theta[s, :]` for the *current* state each step. All other states' traces were frozen at their last value. This caused V to grow unboundedly (traces from distant past steps still carry full weight into the global update `V += lr * delta * z_v`). Fix: `self._z_v *= gc` (decay all), then `self._z_v[s] += 1.0` (accumulate current). Same for z_theta.
+
+2. **AC(lambda) actor trace sign wrong for cost minimisation**:
+   Traces were accumulating `(I_a - pi)` — the reward-maximisation gradient direction. For cost minimisation, `theta += lr * delta * z_theta` should push the policy *away from* costly actions (theta[a_taken] should decrease when delta > 0). Requires trace to hold `(pi - I_a)`. Fix: `z_theta[s, :] += pi; z_theta[s, a] -= 1.0` (was `-= pi; += 1.0`). Now consistent with the one-step AC actor update.
+
+   Before fix: `policy_err` stuck at 1.50 for all 300 episodes (policy not learning).
+   After fix: `policy_err` 0.684 → 0.666 at episodes 50 → 100, continuing to improve.
+
+**Independent decisions:**
+- `abs_err` for policy-gradient / AC agents is expected to be large because `get_value_estimate()` returns V^pi (the critic value of the *current policy*), not V*. A suboptimal policy legitimately has high V^pi in this environment (wall costs of 1000 make V^pi >> V* early in training). The diagnostic metric for these agents is `policy_err`, not `abs_err`.
+- Policy-eval metric recorded every 50 episodes (30 checkpoints per 1500-episode run) to keep runtime acceptable — policy_eval calls a linear solve internally.
+- `run_episode()` uses `hasattr` to detect protocol differences (SARSA/G-learning/REINFORCE) rather than isinstance, keeping the loop agnostic to class hierarchy.

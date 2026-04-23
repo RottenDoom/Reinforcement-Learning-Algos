@@ -5,7 +5,7 @@
 Course project implementing and comparing model-free RL control algorithms on a
 custom 8x8 Gridworld (Fox et al. 2016). The final deliverables are a codebase
 and a comparison report. All algorithms must be comparable under identical
-environment instances, seeds, and hyperparameters.
+environment instances, seeds, and hyperparameters.                                                                                       
 
 ---
 
