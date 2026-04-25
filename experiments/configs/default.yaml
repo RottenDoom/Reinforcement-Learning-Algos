@@ -5,24 +5,43 @@ environment:
   n_runs: 10
 
 learning_rate:
-  omega: 0.8        # alpha_t = (1 / visit_count[s,a]) ^ omega
+  omega: 0.8        # tuned: best for Q-learning (nb01); SARSA prefers 0.9 but Q-learning is primary
 
 exploration:
-  epsilon_start: 0.4
+  epsilon_start: 0.2   # tuned from 0.4 — nb01 (QL: 0.062), nb02 (SARSA combined best)
   epsilon_decay: 0.9   # per step within an episode
 
 entropy_q:
-  beta_min: 0.1
-  beta_max: 7.0        # linearly scheduled over n_episodes
+  beta_min: 0.01    # tuned from 0.1 — nb01 (0.0901 vs 0.0902 at 0.1, flatter but marginal)
+  beta_max: 7.0     # confirmed optimal — nb01
 
 sarsa_lambda:
-  lambda_val: 0.9
+  lambda_val: 0.9   # reference value; SARSA family does not use lambda traces
 
 actor_critic:
-  lambda_critic: 0.9
-  lambda_actor: 0.9
-  lr_actor: 0.01
+  lambda_critic: 0.0   # tuned from 0.9 — nb04: traces hurt with high-variance wall costs
+  lambda_actor: 0.0    # tuned from 0.9 — nb04
+  lr_actor: 0.005      # tuned from 0.01 — nb04 (0.356 vs 0.460 at 0.01)
 
 reinforce:
-  lr_policy: 0.01
-  lr_baseline: 0.1
+  lr_policy: 0.001    # tuned from 0.01 — nb03: wall-collision variance demands small step
+  lr_baseline: 0.05   # tuned from 0.1  — nb03 (0.474 vs 0.617 at 0.1)
+
+# Optimization-notebook hyperparameters (notebooks 06-09).
+# These are used only inline in those notebooks, not by algorithms/.
+sgd_optimization:
+  lr: 0.001            # best for SGD+Momentum — nb06
+  lr_vanilla: 0.005    # best for vanilla SGD  — nb06
+  momentum_beta: 0.9   # best heavy-ball beta  — nb06
+  nesterov_beta: 0.99  # best Nesterov beta    — nb06
+
+mirror_descent:
+  lr: 0.005            # best eta — nb07 (0.345 vs 0.429 at 0.001)
+
+natural_pg:
+  lr: 0.005            # best lr  — nb08; note policy_err ~1.44 across all lr (poor convergence)
+
+trpo:
+  delta: 0.01           # best KL trust-region radius — nb09; sweep flat (1.390–1.414), marginal
+  line_search_steps: 5  # nb09: all step counts identical to 4dp — use minimum for efficiency
+  max_alpha: 1.0        # initial step size before backtracking
