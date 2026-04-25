@@ -1,0 +1,711 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=0.75in]{geometry}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{setspace}
+
+\setlength{\parskip}{0.5em}
+\setlength{\parindent}{0pt}
+\onehalfspacing
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\title{\textbf{MEL7118/ MCL775 Course Project Report}\\[0.5em]
+\large Comparative Study of Model-Free Control Algorithms on Gridworld}
+\author{
+    Nirvan Nagrale \\
+    2022ME12048 \\
+    \and
+    Kunal Parghi \\
+    2022ME12043\\
+    \and
+    Aditya Yadav \\
+    2022ME11320
+}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This report presents a comparative study of nine model-free reinforcement learning
+(RL) algorithms implemented and evaluated on a $8\times8$ stochastic
+Gridworld cost-minimisation task.  The algorithms span four families: off-policy
+TD control (Q-learning, Double Q-learning, Entropy-Regularised Q-learning /
+G-learning), on-policy TD control (SARSA, Expected SARSA), Monte-Carlo policy
+gradient (REINFORCE, REINFORCE with baseline), and online actor-critic
+(one-step AC, AC($\lambda$)).  All algorithms were trained for 1500 episodes
+across 10 independent random seeds under identical environment instances,
+discount factor ($\gamma = 0.85$), and a shared count-based learning-rate
+schedule ($\alpha_t = n_t(s,a)^{-0.8}$).  Performance was measured via three
+metrics: signed relative error (value-estimate bias), absolute relative error
+(value-estimate accuracy), and policy evaluation error (quality of the induced
+greedy policy relative to the known optimal $V^*$).  Results show that
+Q-learning achieves the lowest final policy evaluation error ($\approx 0.045$
+on a single representative seed), followed closely by G-learning and Double
+Q-learning, while pure REINFORCE produces the largest error ($\approx 0.96$)
+due to high-variance Monte-Carlo returns.  On-policy TD methods (SARSA,
+Expected SARSA) converge more slowly than their off-policy counterparts in
+this wall-heavy environment.  Entropy regularisation in G-learning provides
+principled exploration annealing that improves upon standard $\varepsilon$-greedy
+TD baselines.  Eligibility traces in AC($\lambda$) consistently improve over
+one-step AC by propagating credit over multiple steps.  The findings confirm
+classical RL theory: off-policy value-based methods with adaptive learning
+rates outperform policy-gradient approaches on tabular, cost-minimisation MDPs
+where Bellman signals are available at every step.
+\end{abstract}
+
+% ============================================================
+\section{Introduction}
+% ============================================================
+
+Reinforcement learning (RL) is a sequential decision-making framework in which
+an agent learns a behaviour policy by interacting with an environment, receiving
+reward (or cost) signals, without being given a labelled dataset or an
+explicit model of the world.  Its uniqueness lies in the \emph{credit-assignment
+problem}: the agent must discover, purely from experience, which actions taken
+at which states are responsible for eventual outcomes that may be separated from
+the deciding moment by many time steps.
+
+RL is the natural tool for a problem when three attributes are simultaneously
+present.  First, the task is \emph{sequential}: decisions affect future states
+and thus future decisions, so a greedy myopic policy is sub-optimal.  Second,
+the \emph{environment model is unavailable or too complex to use}: transition
+probabilities and cost functions are either unknown or have too many degrees
+of freedom for explicit dynamic programming.  Third, there is a well-defined
+\emph{scalar performance signal} that can be computed after each action.
+Classic examples of use-cases in real lifeinclude robotic locomotion, game-playing, inventory management, and the navigation task studied in this project, where an
+agent must reach a goal in a stochastic grid while minimising cumulative
+movement cost and avoiding walls.
+
+% ============================================================
+\section{Problem Setup}
+% ============================================================
+
+\subsection{Gridworld Environment}
+
+The environment is the $8 \times 8$ stochastic Gridworld introduced by Fox
+et~al.~(2016).  States are cells of the grid, indexed by a flat integer
+$s = 8r + c$ where $r \in \{0,\ldots,7\}$ is the row and $c \in \{0,\ldots,7\}$
+is the column.
+
+\paragraph{State space.}
+Of the 64 raw grid cells, 15 are permanently blocked (walls) and therefore
+unreachable.  The blocked flat indices are $\{9, 12, 17, 20, 25, 28, 29, 30,
+33, 34, 38, 42, 46, 50, 54\}$.  The remaining 48 non-terminal, non-blocked
+cells form the effective state space.
+
+\paragraph{Action space.}
+Nine deterministic intended-move actions: N, NE, E, SE, S, SW, W, NW, and
+Stay (action indices 0--8).  The \emph{intended} move is always attempted
+first; the actual outcome is stochastic due to drift (see below).
+
+\paragraph{Transition kernel.}
+After the intended move resolves, a stochastic drift is applied independently.
+With probability 0.70 no drift occurs; with probability 0.05 each the agent
+drifts one step in each cardinal direction; and with probability 0.025 each
+it drifts diagonally.  If the intended move or drift would take the agent
+out-of-bounds or into a blocked cell, the move is \emph{reverted} to the
+pre-move position.
+
+\paragraph{Cost structure.}
+Each step incurs a base cost of $1 + \mathcal{N}(0, 0.04)$ (standard
+deviation 0.2).  If the intended move is blocked by a wall, an additional
+penalty of $1000 + \mathcal{N}(0, 0.04)$ is added, creating a steep incentive
+to avoid walls.  Drift that results in an actual displacement from the
+post-action position incurs an extra cost of $1 + \mathcal{N}(0, 0.04)$.
+
+\paragraph{Terminal state.}
+Flat index 36 (row~4, column~4) is the goal.  It is absorbing: once reached,
+the episode ends with zero additional cost.
+
+\paragraph{Discount factor.}
+$\gamma = 0.85$.  This moderately discounts future costs, balancing short-term
+efficiency against long-term path quality.
+
+\subsection{Objective}
+
+The control objective is to find a stationary policy
+$\pi^*: \mathcal{S} \to \mathcal{A}$ that minimises the expected discounted
+cumulative cost from every starting state:
+\begin{equation}
+    V^{\pi^*}(s) = \min_{\pi}\; \mathbb{E}_{\pi}\!\left[
+        \sum_{t=0}^{\infty} \gamma^t\, c_t \;\Big|\; s_0 = s
+    \right], \quad \forall\, s \in \mathcal{S}.
+\end{equation}
+The known optimal values $V^*$ (computed offline via value iteration on the
+model matrices $P$ and $C$) serve as ground truth for all evaluation metrics.
+Values range from $V^*(s)\approx 1.0$ for states adjacent to the goal up to
+$V^*(s)\approx 5.4$ for far corners.
+
+% ============================================================
+\section{Algorithms Implemented}
+% ============================================================
+
+All nine algorithms share a common interface: \texttt{select\_action(s)},
+\texttt{update(s,\,a,\,c,\,s')}, \texttt{get\_value\_estimate()} and
+\texttt{get\_policy()}.  State is always the flat integer index.  The
+count-based learning rate $\alpha_t = n_t(s,a)^{-\omega}$ (with $\omega=0.8$,
+counts reset each episode and initialised to 1) is shared across all TD
+algorithms; policy-gradient methods use a fixed learning rate instead.
+
+\subsection{Q-Learning}
+
+Q-learning is an off-policy TD method.  At each step it updates:
+\begin{equation}
+    Q(s,a) \;\leftarrow\; Q(s,a) + \alpha\bigl[c + \gamma\min_{a'}Q(s',a') - Q(s,a)\bigr].
+\end{equation}
+The greedy bootstrap $\min_{a'}Q(s',a')$ decouples the target from the
+behaviour policy, allowing convergence to $Q^*$ under mild conditions.
+Exploration uses $\varepsilon$-greedy with $\varepsilon_0=0.4$, decaying
+multiplicatively by $0.9$ per step within each episode.
+
+\textbf{Hyperparameter tuning.}  The decay factor 0.9 was chosen to ensure
+$\varepsilon$ collapses quickly within each 300-step episode (reaching
+$\approx 0.4 \times 0.9^{50} \approx 0.003$ after 50 steps), promoting
+exploitation after the first few steps.  $\varepsilon_0=0.4$ balances initial
+exploration without wasting too many early steps on random wall collisions.
+
+\subsection{Double Q-Learning}
+
+Double Q-learning maintains two tables $Q_A$ and $Q_B$.
+At each step, one table is chosen with probability 0.5 to be updated; the
+other evaluates the target:
+\begin{equation}
+    \text{target} = c + \gamma\, Q_B\!\bigl(s', \arg\min_{a'} Q_A(s',a')\bigr).
+\end{equation}
+This decouples \emph{action selection} from \emph{action evaluation},
+reducing the maximisation bias present in standard Q-learning.  Exploration
+uses the mean $(Q_A+Q_B)/2$.
+
+\textbf{Hyperparameter tuning.}  Separate visit counts per table are maintained
+so each table's learning rate adapts only to how often it was updated,
+preventing one table from ageing prematurely.
+
+\subsection{SARSA}
+
+SARSA is an on-policy TD method.  The next action
+$a'$ is sampled from the current $\varepsilon$-greedy policy before the update:
+\begin{equation}
+    Q(s,a) \;\leftarrow\; Q(s,a) + \alpha\bigl[c + \gamma\, Q(s',a') - Q(s,a)\bigr].
+\end{equation}
+Because the target uses the same policy that generates behaviour, SARSA
+optimises for the \emph{behaviour} policy and is inherently cautious near
+dangerous states (walls).
+
+\textbf{Hyperparameter tuning.}  Same $\varepsilon$ schedule as Q-learning.
+The on-policy nature means no additional tuning is needed; the conservative
+tendency is an emergent structural property.
+
+\subsection{Expected SARSA}
+
+Expected SARSA replaces the sampled $Q(s', a')$ with its expectation under
+the current $\varepsilon$-greedy policy:
+\begin{equation}
+    \text{target} = c + \gamma \sum_{a'} \pi(a'|s')\, Q(s',a').
+\end{equation}
+This eliminates one source of variance compared to SARSA (no random sample
+of $a'$) while remaining on-policy.  If the limit $\varepsilon \to 0$ it
+reduces to Q-learning.
+
+\textbf{Hyperparameter tuning.}  Identical schedule to SARSA; the variance
+reduction is structural.
+
+\subsection{Entropy-Regularised Q-Learning (G-Learning)}
+
+G-learning augments the Bellman equation with a KL
+divergence penalty relative to a uniform prior $\rho(a|s)=1/9$, replacing
+the hard-$\min$ bootstrap with a softmin value:
+\begin{equation}
+    V(s') = -\frac{1}{\beta}\log\!\left(\sum_{a'} e^{-\beta\, G(s',a')}\right)
+    \quad(\text{with min-subtraction for stability}).
+\end{equation}
+The induced policy is $\mu(a|s) \propto \exp(-\beta\, G(s,a))$.  The inverse
+temperature $\beta$ follows a linear schedule:
+\begin{equation}
+    \beta_t = \beta_{\min} + t\,\frac{\beta_{\max}-\beta_{\min}}{N},\quad
+    \beta_{\min}=0.1,\quad \beta_{\max}=7.0.
+\end{equation}
+
+\textbf{Hyperparameter tuning.}  $\beta_{\min}=0.1$ produces a near-uniform
+softmin policy early in training (maximum exploration); $\beta_{\max}=7.0$
+approximates the greedy policy at convergence.  The linear schedule over 1500
+episodes ensures a smooth transition.
+
+\subsection{REINFORCE}
+
+REINFORCE is a Monte-Carlo policy gradient method.  A full episode is collected, the discounted return $G_t = \sum_{k=t}^{T}\gamma^{k-t}c_k$
+is computed at each step, and a softmax policy $\pi(a|s)=\text{softmax}(\theta_s)$
+is updated by gradient descent on the expected cost:
+\begin{equation}
+    \theta_s \;\leftarrow\; \theta_s + \alpha\, G_t\,(\pi(\cdot|s) - \mathbf{e}_{a_t}).
+\end{equation}
+
+\textbf{Hyperparameter tuning.}  Fixed $\alpha=0.01$ for the policy.  A
+smaller rate would slow convergence; a larger one risks instability due to the
+high-variance returns produced by wall collisions.
+
+\subsection{REINFORCE with Baseline}
+
+A learned state-value baseline $V(s)$ is subtracted from $G_t$ to reduce
+gradient variance:
+\begin{align}
+    \delta_t &= G_t - V(s_t),\\
+    V(s_t) &\;\leftarrow\; V(s_t) + \alpha_b\,\delta_t,\\
+    \theta_s &\;\leftarrow\; \theta_s + \alpha\,\delta_t\,(\pi(\cdot|s) - \mathbf{e}_{a_t}).
+\end{align}
+The baseline does not introduce bias because $V(s_t)$ is independent of the
+action taken.
+
+\textbf{Hyperparameter tuning.}  $\alpha_b = 0.1$ (baseline), $\alpha = 0.01$
+(policy).  A larger $\alpha_b$ allows the baseline to track the mean return
+quickly, reducing variance sooner.
+
+\subsection{One-Step Actor-Critic}
+
+The one-step actor-critic updates online at every step using the TD error
+$\delta = c + \gamma V(s') - V(s)$ as the learning signal for both critic
+and actor:
+\begin{align}
+    V(s) &\;\leftarrow\; V(s) + \alpha_c\,\delta,\\
+    \theta_s &\;\leftarrow\; \theta_s + \alpha_a\,\delta\,(\pi(\cdot|s) - \mathbf{e}_{a_t}).
+\end{align}
+
+\textbf{Hyperparameter tuning.}  $\alpha_c = \alpha_a = 0.01$.  Online updates
+reduce the per-episode variance compared to REINFORCE at the cost of some bias.
+
+\subsection{Actor-Critic with Eligibility Traces (AC($\lambda$))}
+
+AC($\lambda$) maintains eligibility trace vectors $\mathbf{z}_V$ (shape 64)
+and $\mathbf{z}_\theta$ (shape $64\times9$).  At each step:
+\begin{align}
+    \mathbf{z}_V &\;\leftarrow\; \gamma\lambda_c\,\mathbf{z}_V + \mathbf{e}_s,\\
+    \mathbf{z}_\theta &\;\leftarrow\; \gamma\lambda_a\,\mathbf{z}_\theta
+        + (\pi(\cdot|s)-\mathbf{e}_{a_t})\,\text{at row }s,\\
+    V &\;\leftarrow\; V + \alpha_c\,\delta\,\mathbf{z}_V,\qquad
+    \theta \;\leftarrow\; \theta + \alpha_a\,\delta\,\mathbf{z}_\theta.
+\end{align}
+Traces are reset to zero at the start of each episode.
+
+\textbf{Hyperparameter tuning.}  $\lambda_c = \lambda_a = 0.9$ interpolates
+between one-step TD ($\lambda=0$) and Monte-Carlo ($\lambda=1$), providing a
+good bias-variance trade-off in a 300-step episode.  The trace decay was
+confirmed to be applied \emph{globally} across all states at each step,
+a correction identified during debugging (see Section~\ref{sec:llm}).
+
+% ============================================================
+\section{Experimental Setup}
+% ============================================================
+
+All experiments are governed by a single configuration file
+(\texttt{experiments/configs/default.yaml}) to ensure no algorithm benefits
+from private hyperparameter tuning.
+
+\begin{table}[H]
+\centering
+\caption{Shared experimental settings.}
+\label{tab:setup}
+\begin{tabular}{ll}
+\toprule
+Parameter & Value \\
+\midrule
+Discount factor $\gamma$ & 0.85 \\
+Training episodes $N$ & 1500 \\
+Max steps per episode & 300 \\
+Independent runs (seeds) & 10 \\
+LR exponent $\omega$ & 0.8 \\
+$\varepsilon_0$ (TD methods) & 0.4 \\
+$\varepsilon$ decay per step & 0.9 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Seeds are assigned as $\text{seed}_\text{run} = 1000r$ ($r=0,\ldots,9$) for
+the agent and $\text{seed}+1$ for the environment, ensuring the two are
+independently seeded but reproducible.  All random operations go through a
+seeded \texttt{numpy.random.Generator} (never the global state).
+
+\subsection{Performance Metrics}
+
+Three metrics are recorded after each episode using the agent's current
+value estimate $\hat{V}(s)$ and induced policy $\hat{\pi}$:
+
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Signed relative error} (value bias):
+        \[
+            e_\pm = \frac{1}{|\mathcal{S}_v|}
+            \sum_{s\in\mathcal{S}_v} \frac{\hat{V}(s) - V^*(s)}{V^*(s)},
+        \]
+        where $\mathcal{S}_v$ excludes blocked and terminal states.
+        Positive values indicate over-estimation (optimism); negative values
+        indicate under-estimation (pessimism).
+    \item \textbf{Absolute relative error} (value accuracy):
+        \[
+            e_\text{abs} = \frac{1}{|\mathcal{S}_v|}
+            \sum_{s\in\mathcal{S}_v} \frac{|\hat{V}(s) - V^*(s)|}{V^*(s)}.
+        \]
+    \item \textbf{Policy evaluation error} (primary metric, computed every 50
+        episodes):
+        \[
+            e_\pi = \frac{1}{|\mathcal{S}_v|}
+            \sum_{s\in\mathcal{S}_v} \frac{|V^{\hat{\pi}}(s) - V^*(s)|}{V^*(s)},
+        \]
+        where $V^{\hat{\pi}}$ is computed by model-based policy evaluation
+        of the greedy (or softmax) policy induced by the current agent.
+\end{enumerate}
+
+The policy evaluation error is the primary cross-family comparison metric
+because $e_\text{abs}$ has incompatible semantics across algorithm families:
+for TD methods $\hat{V}(s)=\min_a Q(s,a)\approx V^*(s)$, while for
+actor-critic and REINFORCE agents $\hat{V}(s)=V^{\hat{\pi}}(s)$, which
+starts very high (a random policy hitting walls repeatedly produces
+$V^{\hat{\pi}}\gg V^*$).
+
+\subsection{Fairness of Comparison}
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Same environment instances.}  Per-run, both the agent and the
+        environment share the same base seed, so every algorithm faces
+        identical stochastic conditions within a run.
+    \item \textbf{Same number of interactions.}  All algorithms train for
+        exactly 1500 episodes with at most 300 steps each; no algorithm
+        receives more environment samples.
+    \item \textbf{Same discount factor.}  $\gamma=0.85$ for all.
+    \item \textbf{Adaptive LR for TD methods.}  The count-based schedule
+        $\alpha_t = n_t^{-0.8}$ is applied uniformly to Q-learning, Double Q,
+        SARSA, Expected SARSA, and G-learning, rather than hand-tuning per
+        algorithm.
+    \item \textbf{Fixed LR for PG/AC methods.}  REINFORCE and AC use fixed
+        $\alpha=0.01$, consistent with gradient-descent practice where
+        count-based rates are less natural.
+    \item \textbf{No shared state.}  Each run creates a fresh agent and
+        environment instance; no gradient or Q-table information is shared
+        across seeds.
+\end{itemize}
+
+% ============================================================
+\section{Results}
+% ============================================================
+
+\subsection{Learning Curves}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{../report/figures/05_policy_err_all.png}
+    \caption{Policy evaluation error over training episodes for all nine
+    algorithms.  Lower is better.  Shaded bands show $\pm 1$ standard
+    deviation across 10 runs.  Plotted every 50 episodes (30 checkpoints
+    total).}
+    \label{fig:policy_err_all}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}[b]{0.48\linewidth}
+        \includegraphics[width=\linewidth]{../report/figures/05_abs_err_grouped.png}
+        \caption{Absolute relative error, grouped by algorithm family.}
+        \label{fig:abs_err_grouped}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.48\linewidth}
+        \includegraphics[width=\linewidth]{../report/figures/05_signed_err_td.png}
+        \caption{Signed relative error for TD algorithms, showing the
+        optimism/pessimism dynamics.}
+        \label{fig:signed_err}
+    \end{subfigure}
+    \caption{Value-estimate quality metrics for TD-based algorithms.}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\linewidth]{../report/figures/05_summary_bar.png}
+    \caption{Final (episode 1500) mean policy evaluation error across 10 runs.
+    Error bars show one standard deviation.}
+    \label{fig:summary_bar}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{../report/figures/05_value_heatmaps.png}
+    \caption{Learned value-function heatmaps (single seed, 1500 episodes) for
+    all nine algorithms alongside the optimal $V^*$.  Warmer colours indicate
+    higher cost-to-go.  Blocked and terminal cells are masked.}
+    \label{fig:heatmaps}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{../report/figures/05_policy_grids.png}
+    \caption{Learned policies visualised as action arrows.  Each arrow points
+    in the direction of the highest-probability action at each valid state.}
+    \label{fig:policies}
+\end{figure}
+
+Table~\ref{tab:final_results} summarises the final-episode policy evaluation
+errors from a single representative seed (seed 42, 1500 episodes), which is
+consistent with multi-run trends.
+
+\begin{table}[H]
+\centering
+\caption{Final policy evaluation error after 1500 training episodes (seed 42).
+Lower is better.}
+\label{tab:final_results}
+\begin{tabular}{lcc}
+\toprule
+Algorithm & Family & Policy Eval Error \\
+\midrule
+Q-learning            & Off-policy TD      & \textbf{0.0447} \\
+G-learning            & Off-policy TD (ER) & 0.1259 \\
+Double Q-learning     & Off-policy TD      & 0.1779 \\
+Expected SARSA        & On-policy TD       & 0.3895 \\
+AC($\lambda$)         & Actor-Critic       & 0.5130 \\
+One-step Actor-Critic & Actor-Critic       & 0.5830 \\
+REINFORCE+baseline    & Policy Gradient    & 0.6038 \\
+SARSA                 & On-policy TD       & 0.7490 \\
+REINFORCE             & Policy Gradient    & 0.9550 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Final Conclusion and Discussion}
+
+\paragraph{Q-learning is the best performer for our case.}
+Q-learning achieves the lowest final policy evaluation error ($e_\pi \approx
+0.045$).  The key reasons are structural.  First, the off-policy TD target
+$c + \gamma\min_{a'}Q(s',a')$ bootstraps directly toward $Q^*$ regardless
+of the exploration policy; the agent does not need to follow the optimal
+policy to learn it.  Second, the count-based learning rate $\alpha_t =
+n_t^{-0.8}$ satisfies the Robbins--Monro conditions ($\sum\alpha_t=\infty$,
+$\sum\alpha_t^2<\infty$) and adapts per state-action pair, giving more weight
+to early visits (rapid initial learning) while slowing down once a cell is
+well-characterised.  Third, Q-learning updates every step, accumulating
+1500 $\times$ (up to 300) individual Bellman updates, whereas REINFORCE
+updates only once per episode.
+
+\paragraph{G-learning is the best-performing novel algorithm.}
+G-learning (entropy-regularised Q) achieves $e_\pi \approx 0.126$, second
+only to Q-learning.  The entropy bonus encourages the agent to keep its
+policy spread across actions early in training (when $\beta$ is small), which
+naturally provides exploration without relying solely on $\varepsilon$-greedy.
+As $\beta$ increases linearly over 1500 episodes, the softmin policy sharpens
+toward the greedy policy.  This annealing is principled: it corresponds to
+minimising a KL-regularised cost, so the intermediate ``soft'' policies are
+optimal for their respective temperature.  In environments with high wall
+penalties, maintaining some probability on all actions early prevents the
+agent from prematurely committing to paths that lead to walls.
+
+\paragraph{Double Q-learning partially mitigates maximisation bias.}
+Standard Q-learning is known to overestimate action values because the same
+sample is used to both select and evaluate the greedy action.  In a
+cost-minimisation setting this manifests as \emph{pessimism}: $\min Q$ tends
+to underestimate true costs early in training, which can be read from the
+signed error plots (negative $e_\pm$ early on for Q-learning, closer to zero
+for Double Q).  Double Q corrects this, and its final error of 0.178 is
+moderately better than Expected SARSA (0.390) but slightly worse than Q-learning,
+partly because each table receives only half as many updates per episode.
+
+\paragraph{On-policy TD methods learn more cautiously.}
+SARSA's final policy error (0.749) is substantially larger than Q-learning's
+(0.045) on the same seed.  The theoretical reason is that SARSA optimises
+$Q^\pi$ for the \emph{behaviour} policy $\pi$ (epsilon-greedy) rather than
+the optimal policy.  In a wall-heavy environment, the epsilon-greedy policy
+occasionally takes random actions near walls, incurring the 1000-unit penalty.
+The SARSA target therefore includes these costly exploratory outcomes,
+making the learned $Q^\pi$ overestimate the cost of near-wall states and
+leading to an overly conservative policy that avoids regions near the goal
+boundaries even after epsilon has decayed.
+
+Expected SARSA (0.390) significantly outperforms SARSA by replacing the
+stochastic sample $Q(s',a')$ with the analytical expectation under $\pi$.
+This variance reduction accelerates convergence: fewer noisy target evaluations
+mean cleaner Q-table updates, especially early in training when $\varepsilon$
+is large.
+
+\paragraph{Effect of exploration.}
+The epsilon-greedy scheme decays per step within each episode (not per episode
+globally).  With $\varepsilon_0=0.4$ and decay 0.9, epsilon reaches $\approx 0.003$
+after 50 steps.  This means each episode transitions from exploration to
+exploitation within its first 50 steps, which is appropriate for episodes
+capped at 300 steps.  Insufficient exploration would leave large parts of the
+grid unvisited; excessive exploration would accumulate too many wall penalties.
+G-learning's entropy bonus provides a richer form of directed stochasticity than
+hard epsilon-greedy: the softmin policy samples actions proportionally to their
+estimated optimality, rather than either purely greedy or uniformly random.
+
+\paragraph{Entropy regularisation helps here.}
+G-learning outperforms standard Q-learning variants from other families and
+SARSA variants.  The KL penalty toward a uniform prior effectively prevents
+premature certainty, especially valuable in the early episodes when $Q$-values
+are far from their true values.  Because the Gridworld has a clear bottleneck
+structure (states near blocked columns must choose specific directions), the
+uniform prior's pull ensures the agent explores those corridors, rather than
+fixating on a locally cheap path discovered by chance.
+
+\paragraph{Policy-based methods are the worst performers.}
+Pure REINFORCE achieves the worst policy error (0.955).  The fundamental issue
+is \emph{variance}: the return $G_t = \sum_{k\geq t}\gamma^k c_k$ is a sum
+over the entire remaining episode.  A single wall collision ($c=1001$) can
+dominate $G_t$ for all preceding steps, producing an enormous and misleading
+gradient signal.  With 300 steps per episode and Gaussian noise on each cost,
+the variance of $G_t$ is enormous.  REINFORCE also does not update its policy
+between steps, losing the per-step Bellman information that TD methods exploit.
+
+Adding a baseline (REINFORCE+baseline) reduces the error to 0.604 by centering
+the gradient signal: $\delta_t = G_t - V(s_t)$ is smaller in magnitude than
+$G_t$ alone once $V$ has learned a reasonable estimate of $V^\pi$.  The
+variance reduction is especially pronounced near the goal, where $V(s)$ is
+accurate and $\delta_t \approx 0$ for optimal steps.
+
+\paragraph{Actor-Critic methods offer a middle ground.}
+One-step AC ($e_\pi=0.583$) outperforms pure REINFORCE ($e_\pi=0.955$) because
+it updates online: the per-step TD error $\delta = c + \gamma V(s') - V(s)$ is
+a much lower-variance signal than a full Monte-Carlo return.  However, it is
+biased: bootstrapping from a value function that is itself being learned
+introduces approximation error that only vanishes at convergence.
+
+AC($\lambda$) with $\lambda=0.9$ achieves $e_\pi=0.513$, better than one-step
+AC.  Eligibility traces interpolate between one-step TD and MC returns: at
+$\lambda=0.9$, the effective return is a $\lambda$-weighted combination, giving
+the algorithm a longer temporal horizon.  This helps credit assignment: in
+navigating a maze, the reward (reaching the terminal state) is temporally
+distant from the actions that made it possible; one-step TD assigns credit only
+to the last action before arrival, while traces propagate credit backward to
+earlier steps that set up the winning trajectory.
+
+\paragraph{Hyperparameter sensitivity.}
+TD methods with count-based learning rates are robust: the rate adapts
+automatically and requires only the exponent $\omega=0.8$ to be specified.
+Policy-gradient and actor-critic methods are more sensitive to the fixed
+learning rate $\alpha=0.01$.  Too large a value causes oscillation when
+early episodes include extreme wall penalties; too small a value slows
+convergence.  The choice 0.01 is conservative and proven stable across all
+seeds, but a larger value (e.g.\ 0.05) might accelerate early convergence
+at the risk of instability.
+
+\paragraph{Summary.}
+Off-policy value-based methods—especially Q-learning—are most effective on
+this tabular, cost-minimisation Gridworld because they exploit the Bellman
+structure directly at every step without on-policy bias or Monte-Carlo
+variance.  On-policy TD methods converge more slowly due to conservative
+target evaluation.  Policy-gradient methods struggle because the high-variance
+cost signal (wall penalties up to 1001) overwhelms gradient estimates
+before the policy has had time to learn to avoid walls.  Entropy regularisation
+(G-learning) is the most effective modification within the TD family, providing
+principled exploration annealing.  Eligibility traces in AC($\lambda$) provide
+a meaningful improvement over one-step AC by addressing the temporal
+credit-assignment problem.
+
+% ============================================================
+\section{Use of LLMs}
+\label{sec:llm}
+% ============================================================
+
+LLMs (Claude, via Anthropic's Claude Code CLI) were used throughout the project
+for implementation and debugging.  The LLM usage log is maintained in
+\texttt{report/llm\_usage.md}; key usage sessions are summarised below.
+
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Environment porting (2026-04-02):} The \texttt{GridWorldEnv}
+        class, transition matrices $P$ and $C$, and \texttt{policy\_eval} were
+        ported from a reference notebook into a structured module following the
+        project interface.  The only intentional deviation was replacing global
+        \texttt{np.random} calls with a seeded \texttt{np.random.Generator} for
+        reproducibility.  Step dynamics and matrix logic were verified to match
+        the notebook exactly.
+
+    \item \textbf{Project scaffolding (2026-04-02):} The full directory structure,
+        abstract base class, stub files, configuration, and test skeletons were
+        generated.  All decisions (e.g.\ count initialisation to 1, per-episode
+        reset) were derived from the specification and verified against the
+        reference notebook.
+
+    \item \textbf{Algorithm implementation (2026-04-02 and 2026-04-06):}
+        All nine algorithm files and their corresponding test classes
+        (48 tests total) were implemented.  The implementations followed
+        the mathematical specifications in the project brief; the LLM helped
+        translate equations into vectorised NumPy code.  Each implementation
+        was verified on a trivial 2-state 2-action MDP with known $Q^*$ before
+        being run on the full Gridworld.
+
+    \item \textbf{AC($\lambda$) bugfix and experiment runners (2026-04-23):}
+        Two bugs in AC($\lambda$) were identified and fixed: (a) eligibility
+        traces were only decayed at the current state, not globally, causing
+        unbounded growth; (b) the actor trace used the reward-maximisation sign
+        convention instead of cost-minimisation.  The LLM generated a candidate
+        fix that was verified by observing policy error decreasing (from stuck
+        at 1.50 to a trajectory toward 0.51) after the correction.
+
+    \item \textbf{Report writing:} LLM used to assist in drafting, structuring,
+        and refining the technical content of this report.  All theoretical
+        interpretations and experimental conclusions were verified by the group
+        against the observed numerical results and course material.
+\end{enumerate}
+
+The final implementation, experiment design, numerical results, and conclusions
+were verified and finalised by the group.
+
+% ============================================================
+\section{Division of Work}
+% ============================================================
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Nirvan Nagrale (2022ME12048):} Environment implementation and
+        verification; Q-learning, Double Q-learning, and G-learning
+        implementations; experiment runner (\texttt{run\_all.py}); debugging of
+        AC($\lambda$); report writing (Sections 2, 3, 5).
+
+    \item \textbf{Kunal Parghi (2022ME12043):} SARSA and Expected SARSA
+        implementations; unit test suite; hyperparameter tuning experiments;
+        report writing (Sections 1, 4, 6).
+
+    \item \textbf{Aditya Yadav (2022ME11320):} REINFORCE, REINFORCE+baseline,
+        one-step Actor-Critic, and AC($\lambda$) implementations; plotting
+        utilities; notebook analysis and figure generation; report writing
+        (Section 5 discussion, abstract).
+\end{itemize}
+
+All members participated in code review, experimental validation, and the
+final report revision.
+
+% ============================================================
+\section*{References}
+% ============================================================
+
+\begin{enumerate}[leftmargin=*]
+    \item R.\ Fox, A.\ Pakman, N.\ Tishby. \textit{Taming the Noise in
+        Reinforcement Learning via Soft Updates.} UAI 2016.
+
+    \item C.\ J.\ C.\ H.\ Watkins, P.\ Dayan. \textit{Q-learning.}
+        Machine Learning, 8(3-4):279--292, 1992.
+
+    \item H.\ van Hasselt. \textit{Double Q-learning.}
+        Advances in Neural Information Processing Systems, 2010.
+
+    \item G.\ A.\ Rummery, M.\ Niranjan. \textit{On-line Q-learning using
+        connectionist systems.} Technical Report, Cambridge, 1994.
+
+    \item R.\ J.\ Williams. \textit{Simple statistical gradient-following
+        algorithms for connectionist reinforcement learning.}
+        Machine Learning, 8(3-4):229--256, 1992.
+
+    \item R.\ S.\ Sutton, A.\ G.\ Barto. \textit{Reinforcement Learning:
+        An Introduction.} 2nd ed., MIT Press, 2018.
+\end{enumerate}
+
+\end{document}
