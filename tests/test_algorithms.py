@@ -12,6 +12,10 @@ from algorithms.expected_sarsa import ExpectedSARSAAgent
 from algorithms.entropy_reg_q import EntropyRegQLearningAgent
 from algorithms.reinforce import REINFORCEAgent, REINFORCEWithBaselineAgent
 from algorithms.actor_critic import ActorCriticAgent, ActorCriticLambdaAgent
+from algorithms.sgd_policy import SGDPolicyAgent
+from algorithms.mirror_descent import MirrorDescentAgent
+from algorithms.natural_pg import NaturalPGAgent
+from algorithms.trpo import TRPOAgent
 from environment.gridworld import GridWorldEnv, INV_ST, TERMINAL_STATE
 
 
@@ -624,3 +628,205 @@ class TestActorCriticLambdaPolicy:
         agent = ActorCriticLambdaAgent(rng=np.random.default_rng(1))
         _run_gridworld(agent, n_episodes=50)
         _policy_sums_to_one(agent)
+
+
+# ===========================================================================
+# Shared helper for episodic (finish_episode) agents
+# ===========================================================================
+
+def _run_gridworld_episodic(agent, n_episodes: int = 200) -> None:
+    """Drive any agent with finish_episode on the full gridworld."""
+    rng = np.random.default_rng(7)
+    env = GridWorldEnv(rng)
+    for _ in range(n_episodes):
+        agent.reset_episode()
+        obs = env.reset()
+        s = int(obs[0]) * 8 + int(obs[1])
+        for _ in range(300):
+            a = agent.select_action(s)
+            obs, cost, done, _ = env.step(a)
+            s_prime = int(obs[0]) * 8 + int(obs[1])
+            agent.update(s, a, cost, s_prime, done)
+            s = s_prime
+            if done:
+                break
+        agent.finish_episode()
+
+
+# ===========================================================================
+# SGD Policy (vanilla, momentum, Nesterov)
+# ===========================================================================
+
+class TestVanillaSGDFiniteness:
+    def test_theta_finite(self):
+        agent = SGDPolicyAgent(rng=np.random.default_rng(0), momentum=0.0)
+        _run_gridworld_episodic(agent, n_episodes=200)
+        assert np.all(np.isfinite(agent.theta))
+
+    def test_value_estimate_is_zeros(self):
+        agent = SGDPolicyAgent(rng=np.random.default_rng(1))
+        V = agent.get_value_estimate()
+        assert V.shape == (64,)
+        assert np.all(V == 0.0)
+
+
+class TestVanillaSGDPolicy:
+    def test_policy_shape_and_non_negative(self):
+        agent = SGDPolicyAgent(rng=np.random.default_rng(0))
+        pi = agent.get_policy()
+        assert pi.shape == (64, 9)
+        assert np.all(pi >= 0.0)
+
+    def test_policy_sums_to_one(self):
+        agent = SGDPolicyAgent(rng=np.random.default_rng(1))
+        _run_gridworld_episodic(agent, n_episodes=50)
+        _policy_sums_to_one(agent)
+
+
+class TestSGDMomentumFiniteness:
+    def test_theta_and_velocity_finite(self):
+        agent = SGDPolicyAgent(
+            rng=np.random.default_rng(0), momentum=0.9, nesterov=False
+        )
+        _run_gridworld_episodic(agent, n_episodes=200)
+        assert np.all(np.isfinite(agent.theta))
+        assert np.all(np.isfinite(agent._vel))
+
+    def test_policy_sums_to_one(self):
+        agent = SGDPolicyAgent(
+            rng=np.random.default_rng(2), momentum=0.9, nesterov=False
+        )
+        _run_gridworld_episodic(agent, n_episodes=50)
+        _policy_sums_to_one(agent)
+
+
+class TestSGDNesterovFiniteness:
+    def test_theta_and_velocity_finite(self):
+        agent = SGDPolicyAgent(
+            rng=np.random.default_rng(0), momentum=0.99, nesterov=True
+        )
+        _run_gridworld_episodic(agent, n_episodes=200)
+        assert np.all(np.isfinite(agent.theta))
+        assert np.all(np.isfinite(agent._vel))
+
+    def test_policy_sums_to_one(self):
+        agent = SGDPolicyAgent(
+            rng=np.random.default_rng(2), momentum=0.99, nesterov=True
+        )
+        _run_gridworld_episodic(agent, n_episodes=50)
+        _policy_sums_to_one(agent)
+
+
+# ===========================================================================
+# Mirror Descent
+# ===========================================================================
+
+class TestMirrorDescentFiniteness:
+    def test_log_pi_finite(self):
+        agent = MirrorDescentAgent(rng=np.random.default_rng(0))
+        _run_gridworld_episodic(agent, n_episodes=200)
+        assert np.all(np.isfinite(agent._log_pi))
+
+    def test_value_estimate_is_zeros(self):
+        agent = MirrorDescentAgent(rng=np.random.default_rng(1))
+        V = agent.get_value_estimate()
+        assert V.shape == (64,)
+        assert np.all(V == 0.0)
+
+
+class TestMirrorDescentPolicy:
+    def test_policy_shape_and_non_negative(self):
+        agent = MirrorDescentAgent(rng=np.random.default_rng(0))
+        pi = agent.get_policy()
+        assert pi.shape == (64, 9)
+        assert np.all(pi >= 0.0)
+
+    def test_policy_sums_to_one(self):
+        """KL-proximal update must maintain valid probability distributions."""
+        agent = MirrorDescentAgent(rng=np.random.default_rng(1))
+        _run_gridworld_episodic(agent, n_episodes=50)
+        _policy_sums_to_one(agent, tol=1e-6)
+
+    def test_policy_sums_to_one_before_training(self):
+        """Initial uniform policy must already sum to 1."""
+        agent = MirrorDescentAgent(rng=np.random.default_rng(2))
+        _policy_sums_to_one(agent)
+
+
+# ===========================================================================
+# Natural Policy Gradient
+# ===========================================================================
+
+class TestNaturalPGFiniteness:
+    def test_theta_and_Q_finite(self):
+        agent = NaturalPGAgent(rng=np.random.default_rng(0))
+        _run_gridworld_episodic(agent, n_episodes=200)
+        assert np.all(np.isfinite(agent.theta))
+        assert np.all(np.isfinite(agent._Q_hat))
+
+    def test_value_estimate_finite(self):
+        agent = NaturalPGAgent(rng=np.random.default_rng(1))
+        _run_gridworld_episodic(agent, n_episodes=100)
+        V = agent.get_value_estimate()
+        assert V.shape == (64,)
+        assert np.all(np.isfinite(V))
+
+
+class TestNaturalPGPolicy:
+    def test_policy_shape_and_non_negative(self):
+        agent = NaturalPGAgent(rng=np.random.default_rng(0))
+        pi = agent.get_policy()
+        assert pi.shape == (64, 9)
+        assert np.all(pi >= 0.0)
+
+    def test_policy_sums_to_one(self):
+        agent = NaturalPGAgent(rng=np.random.default_rng(1))
+        _run_gridworld_episodic(agent, n_episodes=50)
+        _policy_sums_to_one(agent)
+
+
+# ===========================================================================
+# TRPO
+# ===========================================================================
+
+class TestTRPOFiniteness:
+    def test_theta_and_Q_finite(self):
+        agent = TRPOAgent(rng=np.random.default_rng(0))
+        _run_gridworld_episodic(agent, n_episodes=200)
+        assert np.all(np.isfinite(agent.theta))
+        assert np.all(np.isfinite(agent._Q_hat))
+
+    def test_value_estimate_finite(self):
+        agent = TRPOAgent(rng=np.random.default_rng(1))
+        _run_gridworld_episodic(agent, n_episodes=100)
+        V = agent.get_value_estimate()
+        assert V.shape == (64,)
+        assert np.all(np.isfinite(V))
+
+
+class TestTRPOPolicy:
+    def test_policy_shape_and_non_negative(self):
+        agent = TRPOAgent(rng=np.random.default_rng(0))
+        pi = agent.get_policy()
+        assert pi.shape == (64, 9)
+        assert np.all(pi >= 0.0)
+
+    def test_policy_sums_to_one(self):
+        agent = TRPOAgent(rng=np.random.default_rng(1))
+        _run_gridworld_episodic(agent, n_episodes=50)
+        _policy_sums_to_one(agent)
+
+
+class TestTRPOKLConstraint:
+    def test_kl_stays_within_delta(self):
+        """Every accepted step must satisfy mean KL <= delta."""
+        delta = 0.01
+        agent = TRPOAgent(rng=np.random.default_rng(5), delta=delta)
+        _run_gridworld_episodic(agent, n_episodes=100)
+        for kl in agent.kl_history:
+            assert kl <= delta + 1e-9, f"KL {kl:.6f} exceeded delta={delta}"
+
+    def test_history_lengths_match(self):
+        agent = TRPOAgent(rng=np.random.default_rng(6))
+        _run_gridworld_episodic(agent, n_episodes=50)
+        assert len(agent.kl_history) == len(agent.alpha_history) == 50

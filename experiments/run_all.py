@@ -58,6 +58,10 @@ from algorithms.expected_sarsa import ExpectedSARSAAgent
 from algorithms.entropy_reg_q import EntropyRegQLearningAgent
 from algorithms.reinforce import REINFORCEAgent, REINFORCEWithBaselineAgent
 from algorithms.actor_critic import ActorCriticAgent, ActorCriticLambdaAgent
+from algorithms.sgd_policy import SGDPolicyAgent
+from algorithms.mirror_descent import MirrorDescentAgent
+from algorithms.natural_pg import NaturalPGAgent
+from algorithms.trpo import TRPOAgent
 
 logging.basicConfig(
     level=logging.INFO,
@@ -184,6 +188,62 @@ def _make_actor_critic_lambda(
     )
 
 
+def _make_vanilla_sgd(rng: np.random.Generator, cfg: dict) -> SGDPolicyAgent:
+    return SGDPolicyAgent(
+        rng=rng,
+        gamma=cfg["environment"]["gamma"],
+        lr=cfg["sgd_optimization"]["lr_vanilla"],
+        momentum=0.0,
+        nesterov=False,
+    )
+
+
+def _make_sgd_momentum(rng: np.random.Generator, cfg: dict) -> SGDPolicyAgent:
+    return SGDPolicyAgent(
+        rng=rng,
+        gamma=cfg["environment"]["gamma"],
+        lr=cfg["sgd_optimization"]["lr"],
+        momentum=cfg["sgd_optimization"]["momentum_beta"],
+        nesterov=False,
+    )
+
+
+def _make_sgd_nesterov(rng: np.random.Generator, cfg: dict) -> SGDPolicyAgent:
+    return SGDPolicyAgent(
+        rng=rng,
+        gamma=cfg["environment"]["gamma"],
+        lr=cfg["sgd_optimization"]["lr"],
+        momentum=cfg["sgd_optimization"]["nesterov_beta"],
+        nesterov=True,
+    )
+
+
+def _make_mirror_descent(rng: np.random.Generator, cfg: dict) -> MirrorDescentAgent:
+    return MirrorDescentAgent(
+        rng=rng,
+        gamma=cfg["environment"]["gamma"],
+        lr=cfg["mirror_descent"]["lr"],
+    )
+
+
+def _make_natural_pg(rng: np.random.Generator, cfg: dict) -> NaturalPGAgent:
+    return NaturalPGAgent(
+        rng=rng,
+        gamma=cfg["environment"]["gamma"],
+        lr=cfg["natural_pg"]["lr"],
+    )
+
+
+def _make_trpo(rng: np.random.Generator, cfg: dict) -> TRPOAgent:
+    return TRPOAgent(
+        rng=rng,
+        gamma=cfg["environment"]["gamma"],
+        delta=cfg["trpo"]["delta"],
+        max_alpha=cfg["trpo"]["max_alpha"],
+        line_search_steps=cfg["trpo"]["line_search_steps"],
+    )
+
+
 # Registry: display_name -> factory
 ALGORITHMS: dict[str, Any] = {
     "q_learning":           _make_q_learning,
@@ -195,6 +255,12 @@ ALGORITHMS: dict[str, Any] = {
     "reinforce_baseline":   _make_reinforce_baseline,
     "actor_critic":         _make_actor_critic,
     "actor_critic_lambda":  _make_actor_critic_lambda,
+    "vanilla_sgd":          _make_vanilla_sgd,
+    "sgd_momentum":         _make_sgd_momentum,
+    "sgd_nesterov":         _make_sgd_nesterov,
+    "mirror_descent":       _make_mirror_descent,
+    "natural_pg":           _make_natural_pg,
+    "trpo":                 _make_trpo,
 }
 
 
