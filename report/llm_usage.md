@@ -91,7 +91,7 @@ Implement `SARSAAgent` in `algorithms/sarsa.py` and add corresponding tests in `
 
 ---
 
-## 2026-04-06 — Full algorithm suite implementation
+## 2026-04-06 — Full algorithm suite scaffolding
 
 **What was requested:**
 Produce the scaffolding for all remaining algorithms (Double Q-learning, Expected SARSA, G-learning, REINFORCE, REINFORCE-with-baseline, one-step Actor-Critic, AC(lambda)) so that they can be implemented, add tests for each, and update the LLM usage log.
